@@ -1,0 +1,92 @@
+[
+  {
+    "id": "case-1",
+    "question": "Qdrant 是什么？",
+    "answer": "Qdrant 是一个开源的向量相似度搜索引擎，用于存储、搜索和管理向量嵌入。",
+    "answer_snippets": [
+      "开源的向量相似度搜索引擎",
+      "存储、搜索和管理向量嵌入"
+    ],
+    "source_documents": [
+      {
+        "knowledge_base_id": "kb-1",
+        "document_id": "doc-qdrant-intro",
+        "chunk_id": "doc-qdrant-intro-chunk-0"
+      }
+    ],
+    "answer_type": "extractive",
+    "difficulty": "easy",
+    "notes": ""
+  },
+  {
+    "id": "case-2",
+    "question": "如何安装 Qdrant？",
+    "answer": "Qdrant 可以通过 Docker 镜像、二进制文件或源代码进行安装。最简单的方式是使用 Docker。",
+    "answer_snippets": [
+      "Docker 镜像",
+      "二进制文件",
+      "源代码"
+    ],
+    "source_documents": [
+      {
+        "knowledge_base_id": "kb-1",
+        "document_id": "doc-qdrant-install",
+        "chunk_id": "doc-qdrant-install-chunk-1"
+      }
+    ],
+    "answer_type": "abstractive",
+    "difficulty": "medium",
+    "notes": ""
+  },
+  {
+    "id": "case-3",
+    "question": "ai-localbase 项目使用了哪些技术栈？",
+    "answer": "ai-localbase 项目主要使用 Go 语言和 Qdrant 作为后端技术。",
+    "answer_snippets": [
+      "Go 语言",
+      "Qdrant"
+    ],
+    "source_documents": [
+      {
+        "knowledge_base_id": "kb-2",
+        "document_id": "doc-ai-localbase-arch",
+        "chunk_id": "doc-ai-localbase-arch-chunk-0"
+      }
+    ],
+    "answer_type": "extractive",
+    "difficulty": "easy",
+    "notes": ""
+  },
+  {
+    "id": "case-4",
+    "question": "RAG 评估框架的 Phase 1 包含哪些层？",
+    "answer": "RAG 评估框架的 Phase 1 包含数据层和指标层。",
+    "answer_snippets": [
+      "数据层",
+      "指标层"
+    ],
+    "source_documents": [],
+    "answer_type": "extractive",
+    "difficulty": "easy",
+    "notes": "此用例没有 SourceDocuments，将依赖文本包含匹配"
+  },
+  {
+    "id": "case-5",
+    "question": "Qdrant 是否支持多租户？",
+    "answer": "是的，Qdrant 通过 Collection 机制支持多租户。",
+    "answer_snippets": [
+      "Collection 机制",
+      "多租户"
+    ],
+    "source_documents": [
+      {
+        "knowledge_base_id": "kb-1",
+        "document_id": "doc-qdrant-features",
+        "chunk_id": "doc-qdrant-features-chunk-2"
+      }
+    ],
+    "answer_type": "yesno",
+    "difficulty": "medium",
+    "notes": ""
+  }
+]
