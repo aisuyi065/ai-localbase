@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	pdf "github.com/ledongthuc/pdf"
+	"github.com/xuri/excelize/v2"
 )
 
 func ExtractDocumentText(path string) (string, error) {
@@ -21,6 +23,10 @@ func ExtractDocumentText(path string) (string, error) {
 		return extractPlainTextFile(path)
 	case ".pdf":
 		return extractPDFText(path)
+	case ".csv":
+		return extractCSVText(path)
+	case ".xlsx":
+		return extractXLSXText(path)
 	default:
 		return "", fmt.Errorf("unsupported file type: %s", ext)
 	}
@@ -166,6 +172,134 @@ func extractPDFTextWithGoLib(path string) (string, error) {
 	}
 
 	return normalizeExtractedText(string(content)), nil
+}
+
+func extractCSVText(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return "", fmt.Errorf("read csv: %w", err)
+	}
+
+	return normalizeExtractedText(buildDelimitedTableText(filepath.Base(path), "", records)), nil
+}
+
+func extractXLSXText(path string) (string, error) {
+	workbook, err := excelize.OpenFile(path)
+	if err != nil {
+		return "", fmt.Errorf("open xlsx: %w", err)
+	}
+	defer func() { _ = workbook.Close() }()
+
+	sheets := workbook.GetSheetList()
+	sections := make([]string, 0, len(sheets))
+	for _, sheet := range sheets {
+		rows, err := workbook.GetRows(sheet)
+		if err != nil {
+			return "", fmt.Errorf("read xlsx sheet %s: %w", sheet, err)
+		}
+		text := buildDelimitedTableText(filepath.Base(path), sheet, rows)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		sections = append(sections, text)
+	}
+
+	return normalizeExtractedText(strings.Join(sections, "\n\n")), nil
+}
+
+func buildDelimitedTableText(fileName, sheetName string, rows [][]string) string {
+	nonEmptyRows := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		if !rowHasContent(row) {
+			continue
+		}
+		nonEmptyRows = append(nonEmptyRows, trimTrailingEmptyCells(row))
+	}
+	if len(nonEmptyRows) == 0 {
+		return ""
+	}
+
+	headers := normalizeTableHeaders(nonEmptyRows[0])
+	dataRows := nonEmptyRows[1:]
+	builder := &strings.Builder{}
+	if sheetName != "" {
+		fmt.Fprintf(builder, "文件：%s。工作表：%s。字段：%s。数据行数：%d。\n", fileName, sheetName, strings.Join(headers, "、"), len(dataRows))
+	} else {
+		fmt.Fprintf(builder, "文件：%s。字段：%s。数据行数：%d。\n", fileName, strings.Join(headers, "、"), len(dataRows))
+	}
+
+	for index, row := range dataRows {
+		line := buildTableRowLine(headers, row)
+		if line == "" {
+			continue
+		}
+		if sheetName != "" {
+			fmt.Fprintf(builder, "第%d行：工作表：%s；%s\n", index+2, sheetName, line)
+			continue
+		}
+		fmt.Fprintf(builder, "第%d行：%s\n", index+2, line)
+	}
+
+	return strings.TrimSpace(builder.String())
+}
+
+func normalizeTableHeaders(row []string) []string {
+	headers := make([]string, len(row))
+	for index, cell := range row {
+		header := strings.TrimSpace(cell)
+		if header == "" {
+			header = fmt.Sprintf("列%d", index+1)
+		}
+		headers[index] = header
+	}
+	return headers
+}
+
+func buildTableRowLine(headers, row []string) string {
+	parts := make([]string, 0, len(headers))
+	for index, header := range headers {
+		value := ""
+		if index < len(row) {
+			value = strings.TrimSpace(row[index])
+		}
+		if value == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s：%s。", header, value))
+	}
+	return strings.Join(parts, "")
+}
+
+func rowHasContent(row []string) bool {
+	for _, cell := range row {
+		if strings.TrimSpace(cell) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func trimTrailingEmptyCells(row []string) []string {
+	last := len(row) - 1
+	for last >= 0 {
+		if strings.TrimSpace(row[last]) != "" {
+			break
+		}
+		last--
+	}
+	if last < 0 {
+		return []string{}
+	}
+	trimmed := make([]string, last+1)
+	copy(trimmed, row[:last+1])
+	return trimmed
 }
 
 func normalizeExtractedText(text string) string {

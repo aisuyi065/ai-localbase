@@ -1,8 +1,12 @@
 package util
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xuri/excelize/v2"
 )
 
 func TestSemanticChunkBasic(t *testing.T) {
@@ -76,5 +80,53 @@ func TestSemanticChunkMinSize(t *testing.T) {
 	}
 	if !strings.Contains(chunks[0], "这是一个足够长的句子") {
 		t.Fatalf("unexpected chunk: %q", chunks[0])
+	}
+}
+
+func TestExtractDocumentTextFromCSV(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "customers.csv")
+	content := "姓名,部门,城市\n张三,销售部,上海\n李四,技术部,杭州\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+
+	text, err := ExtractDocumentText(path)
+	if err != nil {
+		t.Fatalf("extract csv: %v", err)
+	}
+	if !strings.Contains(text, "文件：customers.csv。字段：姓名、部门、城市。数据行数：2。") {
+		t.Fatalf("expected csv summary, got %q", text)
+	}
+	if !strings.Contains(text, "第2行：姓名：张三。部门：销售部。城市：上海。") {
+		t.Fatalf("expected first csv row, got %q", text)
+	}
+}
+
+func TestExtractDocumentTextFromXLSX(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "finance.xlsx")
+	workbook := excelize.NewFile()
+	defer func() { _ = workbook.Close() }()
+	workbook.SetSheetName("Sheet1", "付款记录")
+	if err := workbook.SetSheetRow("付款记录", "A1", &[]string{"供应商", "金额", "状态"}); err != nil {
+		t.Fatalf("set xlsx header: %v", err)
+	}
+	if err := workbook.SetSheetRow("付款记录", "A2", &[]string{"A公司", "120000", "已完成"}); err != nil {
+		t.Fatalf("set xlsx row: %v", err)
+	}
+	if err := workbook.SaveAs(path); err != nil {
+		t.Fatalf("save xlsx: %v", err)
+	}
+
+	text, err := ExtractDocumentText(path)
+	if err != nil {
+		t.Fatalf("extract xlsx: %v", err)
+	}
+	if !strings.Contains(text, "文件：finance.xlsx。工作表：付款记录。字段：供应商、金额、状态。数据行数：1。") {
+		t.Fatalf("expected xlsx summary, got %q", text)
+	}
+	if !strings.Contains(text, "第2行：工作表：付款记录；供应商：A公司。金额：120000。状态：已完成。") {
+		t.Fatalf("expected xlsx row, got %q", text)
 	}
 }

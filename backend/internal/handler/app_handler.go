@@ -318,14 +318,9 @@ func (h *AppHandler) prepareChatRequest(req model.ChatCompletionRequest) (model.
 	preparedReq.Config = h.appService.CurrentChatConfig()
 	preparedReq.Config.ContextMessageLimit = h.appService.ContextMessageLimit()
 	preparedReq.Messages = h.appService.TrimChatMessages(req.Messages)
-	latestQuestion := ""
-	for index := len(req.Messages) - 1; index >= 0; index-- {
-		if strings.EqualFold(strings.TrimSpace(req.Messages[index].Role), "user") {
-			latestQuestion = strings.TrimSpace(req.Messages[index].Content)
-			break
-		}
-	}
+	latestQuestion := latestUserQuestion(req.Messages)
 	isDiagramRequest := strings.Contains(latestQuestion, "流程图") || strings.Contains(latestQuestion, "架构图") || strings.Contains(latestQuestion, "状态图") || strings.Contains(latestQuestion, "Mermaid")
+	tableQuestionType := detectTableQuestionType(latestQuestion, retrievalContext, contextSummary)
 	if len(contextParts) > 0 {
 		promptSections := []string{
 			"你是 AI LocalBase 知识库助手。请严格遵守以下规范输出 Markdown 格式的回答。",
@@ -347,6 +342,10 @@ func (h *AppHandler) prepareChatRequest(req model.ChatCompletionRequest) (model.
 			"- 有多个维度对比时使用表格",
 		}
 
+		if tableQuestionType != "" {
+			promptSections = append(promptSections, buildTableAnswerRules(tableQuestionType)...)
+		}
+
 		if isDiagramRequest {
 			promptSections = append(promptSections,
 				"",
@@ -358,6 +357,15 @@ func (h *AppHandler) prepareChatRequest(req model.ChatCompletionRequest) (model.
 				"- 禁止输出 mermaidgraphTD、```mermaidgraphTD、endsubgraph、classDefxxxfill:、A-->BB-->C 这类压缩格式",
 				"- 禁止在 Mermaid 代码块中输出中文说明、Markdown 标题、HTML 标签、span/style 内联样式、emoji、补充建议",
 				"- 如果不能保证 Mermaid 语法完全正确，就不要输出 Mermaid，改为普通 Markdown 有序列表描述流程",
+			)
+		} else if tableQuestionType == tableQuestionTypeCount {
+			promptSections = append(promptSections,
+				"",
+				"### 表格计数类固定模板（必须优先遵循）",
+				"- 首句直接给出数量结论，明确回答对象是“文档”或“表格”，不要先写分析过程",
+				"- 第二句只保留最小必要依据，例如“按表头下方的数据行统计，共 X 条记录”",
+				"- 若无歧义，不要输出字段列表、文件名、逐行记录、原始片段复述",
+				"- 若存在重复记录或统计口径不确定，单独补一句说明，不要展开无关明细",
 			)
 		} else {
 			promptSections = append(promptSections,
@@ -385,6 +393,8 @@ func (h *AppHandler) prepareChatRequest(req model.ChatCompletionRequest) (model.
 			"- 只基于以下上下文作答；信息不足时明确说明",
 			"- 不要重复用户的问题，直接输出结构化内容",
 			"- 回答长度适中，每个子章节 2 至 4 条要点即可，保持空行分隔，禁止连续写成一行",
+			"- 同一事实只表达一次，禁止重复段落、重复结论、重复示例",
+			"- 用户问“当前文档”时，不要回答成“整个知识库”；回答对象必须与用户问题一致",
 			"",
 			"## 上下文",
 			strings.Join(contextParts, "\n\n"),
@@ -400,6 +410,86 @@ func (h *AppHandler) prepareChatRequest(req model.ChatCompletionRequest) (model.
 	return preparedReq, allSources, nil
 }
 
+const (
+	tableQuestionTypeCount = "count"
+	tableQuestionTypeList  = "list"
+)
+
+func latestUserQuestion(messages []model.ChatMessage) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "user") {
+			return strings.TrimSpace(messages[index].Content)
+		}
+	}
+	return ""
+}
+
+func detectTableQuestionType(question, retrievalContext, contextSummary string) string {
+	if !looksLikeStructuredTableContext(retrievalContext, contextSummary) {
+		return ""
+	}
+	if isTableCountQuestion(question) {
+		return tableQuestionTypeCount
+	}
+	if isTableListQuestion(question) {
+		return tableQuestionTypeList
+	}
+	return ""
+}
+
+func looksLikeStructuredTableContext(retrievalContext, contextSummary string) bool {
+	combined := retrievalContext + "\n" + contextSummary
+	return strings.Contains(combined, "字段：") && strings.Contains(combined, "数据行数：")
+}
+
+func isTableCountQuestion(question string) bool {
+	trimmed := strings.TrimSpace(question)
+	if trimmed == "" {
+		return false
+	}
+	countMarkers := []string{"多少", "几", "数量", "总数", "共", "总共有"}
+	entityMarkers := []string{"员工", "老师", "教师", "人员", "记录", "行", "条", "名单"}
+	if !containsAny(trimmed, countMarkers) {
+		return false
+	}
+	return containsAny(trimmed, entityMarkers)
+}
+
+func isTableListQuestion(question string) bool {
+	trimmed := strings.TrimSpace(question)
+	if trimmed == "" {
+		return false
+	}
+	listMarkers := []string{"有哪些", "列出", "名单", "分别是", "都有谁", "分别是谁"}
+	return containsAny(trimmed, listMarkers)
+}
+
+func containsAny(text string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildTableAnswerRules(questionType string) []string {
+	rules := []string{
+		"",
+		"### 表格问答附加规则",
+		"- 先回答问题本身，再补充最小必要依据；不要把检索片段直接改写成长段流水账",
+		"- 非用户明确要求时，不要罗列全部字段、全部记录、文件内部过程信息",
+		"- 对表格类问题优先使用短句、列表或表格，不要把多个字段拼成一整段",
+		"- 若上下文出现重复片段，只保留一次结论和一次依据",
+	}
+	if questionType == tableQuestionTypeList {
+		rules = append(rules,
+			"- 若用户要求列举名单，先给总数，再按列表列出名称；无关字段不要混入名单中",
+		)
+	}
+	return rules
+}
+
 func (h *AppHandler) handleUpload(c *gin.Context, candidateKnowledgeBaseID string) {
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -407,7 +497,7 @@ func (h *AppHandler) handleUpload(c *gin.Context, candidateKnowledgeBaseID strin
 		return
 	}
 
-	if err := validateUploadFile(file); err != nil {
+	if err := validateUploadFile(file, h.appService.GetConfig()); err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -452,12 +542,18 @@ func (h *AppHandler) handleUpload(c *gin.Context, candidateKnowledgeBaseID strin
 		})
 }
 
-func validateUploadFile(file *multipart.FileHeader) error {
+func validateUploadFile(file *multipart.FileHeader, cfg model.AppConfig) error {
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	allowed := map[string]struct{}{
 		".txt": {},
 		".md":  {},
 		".pdf": {},
+	}
+	if service.IsSensitiveStructuredFileExtension(ext) {
+		if !service.IsLocalOllamaConfig(cfg.Chat, cfg.Embedding) {
+			return errSensitiveStructuredFileRequiresLocalOllama(ext)
+		}
+		allowed[ext] = struct{}{}
 	}
 
 	if _, ok := allowed[ext]; !ok {
@@ -473,6 +569,10 @@ func errUnsupportedFileType(ext string) error {
 	}
 
 	return &fileTypeError{Extension: ext}
+}
+
+func errSensitiveStructuredFileRequiresLocalOllama(ext string) error {
+	return fmt.Errorf("sensitive structured file type %s requires local ollama for both chat and embedding", ext)
 }
 
 type fileTypeError struct {

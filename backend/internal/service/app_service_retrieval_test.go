@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 
 	"ai-localbase/internal/model"
@@ -144,4 +145,37 @@ func TestIsLowConfidenceSelection(t *testing.T) {
 			t.Fatal("expected confident selection when scores and coverage are sufficient")
 		}
 	})
+}
+
+func TestDeduplicateRetrievedChunks(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-1", DocumentName: "employees.csv", Text: "文件：employees.csv。字段：姓名、职称。数据行数：4。"}, Score: 0.99},
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-1", DocumentName: "employees.csv", Text: "文件：employees.csv。字段：姓名、职称。数据行数：4。"}, Score: 0.95},
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-1", DocumentName: "employees.csv", Text: "第2行：姓名：张三。职称：高级职称。"}, Score: 0.94},
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-2", DocumentName: "other.csv", Text: "文件：other.csv。字段：姓名。数据行数：1。"}, Score: 0.90},
+	}
+
+	filtered := deduplicateRetrievedChunks(chunks)
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 unique chunks, got %d", len(filtered))
+	}
+	if filtered[0].Text != chunks[0].Text {
+		t.Fatalf("expected first chunk to be preserved, got %q", filtered[0].Text)
+	}
+}
+
+func TestBuildChunkTextDeduplicatesRepeatedChunks(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-1", DocumentName: "employees.csv", Text: "文件：employees.csv。字段：姓名、职称。数据行数：4。", Index: 0}, Score: 0.99},
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-1", DocumentName: "employees.csv", Text: "文件：employees.csv。字段：姓名、职称。数据行数：4。", Index: 1}, Score: 0.95},
+		{DocumentChunk: DocumentChunk{DocumentID: "doc-1", DocumentName: "employees.csv", Text: "第2行：姓名：张三。职称：高级职称。", Index: 2}, Score: 0.94},
+	}
+
+	text := buildChunkText(chunks)
+	if strings.Count(text, "字段：姓名、职称。数据行数：4。") != 1 {
+		t.Fatalf("expected repeated summary to appear once, got %q", text)
+	}
+	if !strings.Contains(text, "第2行：姓名：张三。职称：高级职称。") {
+		t.Fatalf("expected row detail to be preserved, got %q", text)
+	}
 }

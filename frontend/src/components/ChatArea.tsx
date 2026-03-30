@@ -57,6 +57,14 @@ function normalizePseudoStructuredLine(line: string): string {
     return ''
   }
 
+  if (/^\|(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(trimmed)) {
+    return line
+  }
+
+  if (/^\|.*\|\s*$/.test(trimmed)) {
+    return line
+  }
+
   if (/^[|:\-\s]+$/.test(trimmed)) {
     return ''
   }
@@ -377,13 +385,745 @@ function normalizeSummarySections(content: string): string {
   return normalized
 }
 
+function normalizeVisualSeparators(content: string): string {
+  let normalized = content
+
+  normalized = normalized.replace(/(^|\n)\s*([=]{3,}|[-]{3,}|_{3,}|[─]{3,}|[━]{3,}|[—]{3,})\s*(?=\n|$)/g, '$1---')
+  normalized = normalized.replace(/(^|\n)\s*(结论|答案|统计依据|计算过程|关键数据|补充说明|注意事项|下一步)\s*[：:]\s*/g, '$1### $2\n\n')
+  normalized = normalized.replace(/(^|\n)\s*(一图概览|核心结论|最终答案|统计结果|主要发现)\s*(?=\n|$)/g, '$1## $2\n\n')
+  normalized = normalized.replace(/([\u4e00-\u9fa5A-Za-z0-9）)])\s*(---)\s*(?=[\u4e00-\u9fa5A-Za-z0-9（(])/g, '$1\n\n$2\n\n')
+
+  return normalized
+}
+
+function normalizeHeadingAttachedTable(content: string): string {
+  let normalized = content
+  normalized = normalized.replace(/(#{2,6}\s[^\n|]+)(\|(?=[^\n|]+\|[^\n|]+\|))/g, '$1\n\n$2')
+  normalized = normalized.replace(/(\|[^\n]+\|)(#{2,6}\s)/g, '$1\n\n$2')
+  normalized = normalized.replace(/(#{3,6}\s)([^\n|]+\|[^\n|]+\|[^\n|]+)(?=\n|$)/g, '$1$2')
+  return normalized
+}
+
+const suggestionFieldAliases: Record<string, string[]> = {
+  category: ['类别', '分类', '类型', '方向', '主题', '模块', '方案'],
+  summary: ['说明', '概述', '结论', '判断', '特点', '核心观点'],
+  recommendation: ['建议', '行动建议', '推荐', '做法', '策略'],
+  scenario: ['适用场景', '适用情况', '适用对象', '适用阶段', '适配场景'],
+  pros: ['优点', '优势', '收益', '好处'],
+  cons: ['缺点', '风险', '不足', '限制', '注意事项'],
+}
+
+const suggestionFieldLabels: Record<string, string> = {
+  category: '类别',
+  summary: '说明',
+  recommendation: '建议',
+  scenario: '适用场景',
+  pros: '优点',
+  cons: '注意事项',
+}
+
+function findSuggestionFieldKey(label: string): string | null {
+  const normalizedLabel = label.trim()
+  for (const [key, aliases] of Object.entries(suggestionFieldAliases)) {
+    if (aliases.includes(normalizedLabel)) {
+      return key
+    }
+  }
+  return null
+}
+
+function parseSuggestionSegments(line: string): Array<{ key: string; label: string; value: string }> {
+  const cleaned = line.trim()
+  if (!cleaned) {
+    return []
+  }
+
+  const matches = [...cleaned.matchAll(/(类别|分类|类型|方向|主题|模块|方案|说明|概述|结论|判断|特点|核心观点|建议|行动建议|推荐|做法|策略|适用场景|适用情况|适用对象|适用阶段|适配场景|优点|优势|收益|好处|缺点|风险|不足|限制|注意事项)\s*[：:]/g)]
+  if (matches.length < 2) {
+    return []
+  }
+
+  const segments: Array<{ key: string; label: string; value: string }> = []
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index]
+    const label = match[1]
+    const key = findSuggestionFieldKey(label)
+    if (!key) {
+      continue
+    }
+    const start = match.index! + match[0].length
+    const end = index + 1 < matches.length ? matches[index + 1].index! : cleaned.length
+    const value = cleaned.slice(start, end).trim().replace(/^[，、；;]+|[，、；;]+$/g, '')
+    if (!value) {
+      continue
+    }
+    segments.push({ key, label, value })
+  }
+
+  return segments
+}
+
+function normalizeSuggestionCardBlocks(content: string): string {
+  const lines = content.split('\n')
+  const normalized: string[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index].trim()
+    const segments = parseSuggestionSegments(current)
+
+    if (segments.length < 2) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    const blockRows: string[] = []
+    let cursor = index
+    while (cursor < lines.length) {
+      const line = lines[cursor].trim()
+      const rowSegments = parseSuggestionSegments(line)
+      if (rowSegments.length < 2) {
+        break
+      }
+      blockRows.push(
+        rowSegments
+          .map((segment) => `${suggestionFieldLabels[segment.key] ?? segment.label}：${segment.value}`)
+          .join(' | '),
+      )
+      cursor += 1
+    }
+
+    if (blockRows.length >= 2) {
+      normalized.push('```advice-cards')
+      normalized.push(...blockRows)
+      normalized.push('```')
+      index = cursor - 1
+      continue
+    }
+
+    normalized.push(lines[index])
+  }
+
+  return normalized.join('\n')
+}
+
+function normalizeLooseTableBlocks(content: string): string {
+  const lines = content.split('\n')
+  const normalized: string[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index].trim()
+    const next = lines[index + 1]?.trim() ?? ''
+
+    const currentCells = current.split('|').map((cell) => cell.trim()).filter(Boolean)
+    const nextCells = next.split('|').map((cell) => cell.trim()).filter(Boolean)
+    const looksLikeTableHeader = currentCells.length >= 3 && nextCells.length === currentCells.length && !/^:?-{3,}:?$/.test(nextCells[0])
+
+    if (!looksLikeTableHeader) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    normalized.push(`| ${currentCells.join(' | ')} |`)
+    normalized.push(`| ${currentCells.map(() => '---').join(' | ')} |`)
+    index += 1
+
+    while (index + 1 < lines.length) {
+      const rowLine = lines[index + 1].trim()
+      if (!rowLine || /^(##|###|>|- |\d+\.)/.test(rowLine)) {
+        break
+      }
+      const rowCells = rowLine.split('|').map((cell) => cell.trim()).filter(Boolean)
+      if (rowCells.length !== currentCells.length) {
+        break
+      }
+      normalized.push(`| ${rowCells.join(' | ')} |`)
+      index += 1
+    }
+  }
+
+  return normalized.join('\n')
+}
+
+function isMarkdownSeparatorCell(cell: string): boolean {
+  return /^:?-{3,}:?$/.test(cell.trim())
+}
+
+function containsDenseTableSeparator(line: string): boolean {
+  return /\|\s*:?-{3,}:?\s*(?=\||$)/.test(line) || /-{3,}/.test(line)
+}
+
+function normalizeInlineMarkdownTables(content: string): string {
+  const lines = content.split('\n')
+  const normalized = lines.map((line) => {
+    const trimmed = line.trim()
+    if (!trimmed.includes('|')) {
+      return line
+    }
+
+    const rawTokens = trimmed.split('|').map((cell) => cell.trim())
+    const tokens = rawTokens.filter(Boolean)
+    if (tokens.length < 6) {
+      return line
+    }
+
+    let sepStart = -1
+    let sepCount = 0
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (!isMarkdownSeparatorCell(tokens[index])) {
+        continue
+      }
+      let end = index
+      for (; end < tokens.length && isMarkdownSeparatorCell(tokens[end]); end += 1) {
+        // count contiguous separator cells
+      }
+      if (end-index >= 2) {
+        sepStart = index
+        sepCount = end-index
+        break
+      }
+    }
+
+    if (sepStart < 0 || sepCount < 2 || sepStart < sepCount) {
+      return line
+    }
+
+    const headers = tokens.slice(sepStart-sepCount, sepStart)
+    if (headers.length !== sepCount || !headers.every((cell) => looksLikePseudoTableHeader(cell) || cell.length <= 20)) {
+      return line
+    }
+
+    const values = tokens.slice(sepStart + sepCount)
+    if (values.length < sepCount) {
+      return line
+    }
+
+    const rows: string[][] = []
+    let cursor = 0
+    for (; cursor + sepCount <= values.length; cursor += sepCount) {
+      rows.push(values.slice(cursor, cursor + sepCount))
+    }
+    if (rows.length === 0) {
+      return line
+    }
+
+    const rebuilt: string[] = []
+    rebuilt.push(`| ${headers.join(' | ')} |`)
+    rebuilt.push(`| ${headers.map(() => '---').join(' | ')} |`)
+    rows.forEach((row) => {
+      rebuilt.push(`| ${row.join(' | ')} |`)
+    })
+    if (cursor < values.length) {
+      rebuilt.push('')
+      rebuilt.push(values.slice(cursor).join(' '))
+    }
+
+    return rebuilt.join('\n')
+  })
+
+  return normalized.join('\n')
+}
+
+function splitDenseTableCells(line: string): string[] {
+  return line
+    .split('|')
+    .map((cell) => cell.trim())
+    .filter(Boolean)
+}
+
+function expandDenseDoublePipeTables(content: string): string {
+  const lines = content.split('\n')
+  const normalized = lines.map((line) => {
+    const trimmed = line.trim()
+    const doublePipeCount = (trimmed.match(/\|\|+/g) ?? []).length
+    const pipeCount = (trimmed.match(/\|/g) ?? []).length
+
+    if (doublePipeCount < 2 || pipeCount < 8) {
+      return line
+    }
+
+    let rebuilt = trimmed.replace(/\|\|+/g, '\n')
+    rebuilt = rebuilt.replace(/\n(>.*)$/g, '\n\n$1')
+    rebuilt = rebuilt.replace(/\|\*\*说明[:：]\*\*/g, '\n\n**说明：**')
+    rebuilt = rebuilt.replace(/\|说明[:：]/g, '\n\n说明：')
+    return rebuilt
+  })
+
+  return normalized.join('\n')
+}
+
+function normalizeSingleLineDenseTables(content: string): string {
+  const lines = content.split('\n')
+  const normalized = lines.map((line) => {
+    const trimmed = line.trim()
+    if (!trimmed.includes('|')) {
+      return line
+    }
+
+    let tailNote = ''
+    let tableSource = trimmed
+    const quoteIndex = tableSource.search(/\|\s*>/)
+    if (quoteIndex >= 0) {
+      tailNote = tableSource.slice(quoteIndex + 1).trim()
+      tableSource = tableSource.slice(0, quoteIndex).trim()
+    }
+
+    const rowSegments = tableSource
+      .split(/\|\|+/)
+      .map((segment) => splitDenseTableCells(segment))
+      .filter((segment) => segment.length > 0)
+
+    if (rowSegments.length >= 2 && rowSegments[0].length >= 2) {
+      const headers = rowSegments[0]
+      const separatorLike = rowSegments[1] ?? []
+      const hasExplicitSeparator =
+        separatorLike.length === headers.length && separatorLike.every((cell) => isMarkdownSeparatorCell(cell))
+      const bodyRows = (hasExplicitSeparator ? rowSegments.slice(2) : rowSegments.slice(1)).filter(
+        (segment) => segment.length === headers.length,
+      )
+      const remainderSegments = hasExplicitSeparator ? rowSegments.slice(2 + bodyRows.length) : rowSegments.slice(1 + bodyRows.length)
+
+      if (
+        bodyRows.length > 0 &&
+        headers.every((cell) => looksLikePseudoTableHeader(cell) || cell.length <= 24)
+      ) {
+        const rebuilt = [
+          `| ${headers.join(' | ')} |`,
+          `| ${headers.map(() => '---').join(' | ')} |`,
+          ...bodyRows.map((row) => `| ${row.join(' | ')} |`),
+        ]
+        const remainderText = remainderSegments.flat().join(' ').trim()
+        const finalNote = tailNote || remainderText
+        if (finalNote) {
+          rebuilt.push('')
+          rebuilt.push(finalNote.startsWith('>') ? finalNote : `> ${finalNote}`)
+        }
+        return `\n${rebuilt.join('\n')}\n`
+      }
+    }
+
+    const parts = splitDenseTableCells(tableSource)
+    if (parts.length < 4) {
+      return line
+    }
+
+    if (containsDenseTableSeparator(tableSource)) {
+      let separatorIndex = -1
+      for (let i = 0; i < parts.length; i += 1) {
+        if (isMarkdownSeparatorCell(parts[i])) {
+          separatorIndex = i
+          break
+        }
+      }
+      if (separatorIndex <= 1) {
+        return line
+      }
+
+      let separatorEnd = separatorIndex
+      for (; separatorEnd < parts.length && isMarkdownSeparatorCell(parts[separatorEnd]); separatorEnd += 1) {
+        // consume contiguous separator cells
+      }
+
+      const columnCount = separatorEnd - separatorIndex
+      const headers = parts.slice(separatorIndex - columnCount, separatorIndex)
+      if (columnCount < 2 || headers.length !== columnCount) {
+        return line
+      }
+      if (!headers.every((cell) => looksLikePseudoTableHeader(cell) || cell.length <= 24)) {
+        return line
+      }
+
+      const values = parts.slice(separatorEnd)
+      if (values.length < columnCount) {
+        return line
+      }
+
+      const rows: string[][] = []
+      let cursor = 0
+      while (cursor + columnCount <= values.length) {
+        rows.push(values.slice(cursor, cursor + columnCount))
+        cursor += columnCount
+      }
+      if (rows.length === 0) {
+        return line
+      }
+
+      const rebuilt = [
+        `| ${headers.join(' | ')} |`,
+        `| ${headers.map(() => '---').join(' | ')} |`,
+        ...rows.map((row) => `| ${row.join(' | ')} |`),
+      ]
+
+      if (cursor < values.length) {
+        rebuilt.push('')
+        rebuilt.push(values.slice(cursor).join(' '))
+      }
+      if (tailNote) {
+        rebuilt.push('')
+        rebuilt.push(tailNote.startsWith('>') ? tailNote : `> ${tailNote}`)
+      }
+
+      return `\n${rebuilt.join('\n')}\n`
+    }
+
+    const looksLikePairwiseTable =
+      parts.length >= 6 &&
+      parts.length % 2 === 0 &&
+      parts.every((cell, index) =>
+        index % 2 === 0 ? looksLikePseudoTableHeader(cell) || cell.length <= 16 : cell.length > 0,
+      )
+
+    if (!looksLikePairwiseTable) {
+      return line
+    }
+
+    const rebuilt = ['| 维度 | 数据说明 |', '| --- | --- |']
+    for (let index = 0; index + 1 < parts.length; index += 2) {
+      rebuilt.push(`| ${parts[index]} | ${parts[index + 1]} |`)
+    }
+
+    if (tailNote) {
+      rebuilt.push('')
+      rebuilt.push(tailNote.startsWith('>') ? tailNote : `> ${tailNote}`)
+    }
+
+    return `\n${rebuilt.join('\n')}\n`
+  })
+
+  return normalized.join('\n')
+}
+
+function shouldStopFragmentedTableBlock(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed) {
+    return true
+  }
+  return /^(##|###|####|>|- |\d+\.|```|文件：|第\d+行：)/.test(trimmed)
+}
+
+function normalizeFragmentedPipeTableBlocks(content: string): string {
+  const lines = content.split('\n')
+  const normalized: string[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index].trim()
+    const next = lines[index + 1]?.trim() ?? ''
+    const currentHasPipe = current.includes('|')
+    const nextHasPipe = next.includes('|')
+
+    if ((!currentHasPipe && !nextHasPipe) || shouldStopFragmentedTableBlock(current)) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    const blockLines: string[] = []
+    let cursor = index
+    while (cursor < lines.length) {
+      const raw = lines[cursor]
+      const trimmed = raw.trim()
+      if (!trimmed) {
+        break
+      }
+      if (cursor > index && shouldStopFragmentedTableBlock(trimmed)) {
+        break
+      }
+      blockLines.push(trimmed)
+      cursor += 1
+      if (cursor < lines.length && shouldStopFragmentedTableBlock(lines[cursor])) {
+        break
+      }
+    }
+
+    const splitRows = blockLines
+      .map((line) => line.split('|').map((cell) => cell.trim()).filter(Boolean))
+      .filter((cells) => cells.length > 0)
+    const expectedCols = Math.max(...splitRows.map((cells) => cells.length), 0)
+    const flattened = splitRows.flat()
+
+    if (expectedCols < 2 || expectedCols > 5 || flattened.length < expectedCols*2) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    const rows: string[][] = []
+    for (let start = 0; start + expectedCols <= flattened.length; start += expectedCols) {
+      rows.push(flattened.slice(start, start + expectedCols))
+    }
+
+    if (rows.length < 2 || !rows[0].every((cell) => looksLikePseudoTableHeader(cell) || cell.length <= 24)) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    normalized.push(`| ${rows[0].join(' | ')} |`)
+    normalized.push(`| ${rows[0].map(() => '---').join(' | ')} |`)
+    rows.slice(1).forEach((row) => {
+      normalized.push(`| ${row.join(' | ')} |`)
+    })
+    index = cursor - 1
+  }
+
+  return normalized.join('\n')
+}
+
+function isLikelyTableValueLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed) {
+    return false
+  }
+  if (/^(##|###|>|- |\d+\.|文件：|第\d+行：)/.test(trimmed)) {
+    return false
+  }
+  return !trimmed.includes('|')
+}
+
+function normalizeVerticalKeyValueTableBlocks(content: string): string {
+  const lines = content.split('\n')
+  const normalized: string[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = lines[index].trim()
+    const cells = current.split('|').map((cell) => cell.trim()).filter(Boolean)
+
+    if (cells.length < 3) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    const headers = cells.slice(0, 2)
+    const firstRowFirstCell = cells[2]
+    const firstRowSecondCell = lines[index + 1]?.trim() ?? ''
+
+    if (!headers.every((cell) => looksLikePseudoTableHeader(cell)) || !isLikelyTableValueLine(firstRowSecondCell)) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    const rows: string[][] = [[firstRowFirstCell, firstRowSecondCell]]
+    let cursor = index + 2
+
+    while (cursor + 1 < lines.length) {
+      const left = lines[cursor].trim()
+      const right = lines[cursor + 1].trim()
+      if (!isLikelyTableValueLine(left) || !isLikelyTableValueLine(right)) {
+        break
+      }
+      rows.push([left, right])
+      cursor += 2
+    }
+
+    if (rows.length < 2) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    normalized.push(`| ${headers.join(' | ')} |`)
+    normalized.push(`| ${headers.map(() => '---').join(' | ')} |`)
+    rows.forEach((row) => {
+      normalized.push(`| ${row.join(' | ')} |`)
+    })
+    index = cursor - 1
+  }
+
+  return normalized.join('\n')
+}
+
+type StructuredSpreadsheetBlock = {
+  fileName: string
+  sheetName?: string
+  headers: string[]
+  rows: string[][]
+}
+
+function parseStructuredSpreadsheetSummary(line: string): StructuredSpreadsheetBlock | null {
+  const match = line.match(/^文件：(.+?)。(?:工作表：(.+?)。)?字段：(.+?)。数据行数：(\d+)。?$/)
+  if (!match) {
+    return null
+  }
+
+  const [, fileName, sheetName, headerText] = match
+  const headers = headerText
+    .split('、')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  if (headers.length === 0) {
+    return null
+  }
+
+  return {
+    fileName: fileName.trim(),
+    sheetName: sheetName?.trim(),
+    headers,
+    rows: [],
+  }
+}
+
+function parseStructuredSpreadsheetRow(line: string, headers: string[]): string[] | null {
+  const match = line.match(/^第\d+行：(.*)$/)
+  if (!match) {
+    return null
+  }
+
+  let payload = match[1].trim()
+  payload = payload.replace(/^工作表：[^；]+；/, '')
+  if (!payload) {
+    return null
+  }
+
+  const pairs = [...payload.matchAll(/([^：。；]+)：([^。；]*)/g)]
+  if (pairs.length === 0) {
+    return null
+  }
+
+  const rowMap = new Map<string, string>()
+  pairs.forEach(([, key, value]) => {
+    rowMap.set(key.trim(), value.trim())
+  })
+
+  return headers.map((header) => rowMap.get(header) ?? '')
+}
+
+function buildStructuredSpreadsheetMarkdown(block: StructuredSpreadsheetBlock): string {
+  const lines: string[] = []
+  lines.push(`<div class="md-spreadsheet-note">数据来源：${block.fileName}${block.sheetName ? ` / ${block.sheetName}` : ''}</div>`)
+  lines.push('')
+  lines.push(`| ${block.headers.join(' | ')} |`)
+  lines.push(`| ${block.headers.map(() => '---').join(' | ')} |`)
+  block.rows.forEach((row) => {
+    lines.push(`| ${row.map((cell) => cell || '—').join(' | ')} |`)
+  })
+  return lines.join('\n')
+}
+
+function normalizeStructuredSpreadsheetBlocks(content: string): string {
+  const lines = content.split('\n')
+  const normalized: string[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const summaryLine = lines[index].trim()
+    const block = parseStructuredSpreadsheetSummary(summaryLine)
+    if (!block) {
+      normalized.push(lines[index])
+      continue
+    }
+
+    let cursor = index + 1
+    while (cursor < lines.length) {
+      const rowLine = lines[cursor].trim()
+      if (!rowLine) {
+        cursor += 1
+        continue
+      }
+      const row = parseStructuredSpreadsheetRow(rowLine, block.headers)
+      if (!row) {
+        break
+      }
+      block.rows.push(row)
+      cursor += 1
+    }
+
+    if (block.rows.length > 0) {
+      normalized.push(buildStructuredSpreadsheetMarkdown(block))
+      index = cursor - 1
+      continue
+    }
+
+    normalized.push(lines[index])
+  }
+
+  return normalized.join('\n')
+}
+
+type AdviceCardItem = {
+  category?: string
+  summary?: string
+  recommendation?: string
+  scenario?: string
+  pros?: string
+  cons?: string
+}
+
+function parseAdviceCardItems(content: string): AdviceCardItem[] {
+  return content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const item: AdviceCardItem = {}
+      line.split('|').forEach((part) => {
+        const [rawLabel, ...rest] = part.split(/[:：]/)
+        if (!rawLabel || rest.length === 0) {
+          return
+        }
+        const key = findSuggestionFieldKey(rawLabel.trim())
+        if (!key) {
+          return
+        }
+        item[key as keyof AdviceCardItem] = rest.join('：').trim()
+      })
+      return item
+    })
+    .filter((item) => Object.keys(item).length >= 2)
+}
+
+const AdviceCardBlock: React.FC<{ content: string }> = ({ content }) => {
+  const items = useMemo(() => parseAdviceCardItems(content), [content])
+
+  if (items.length === 0) {
+    return (
+      <pre className="md-code-block">
+        <code>{content}</code>
+      </pre>
+    )
+  }
+
+  return (
+    <div className="md-advice-grid">
+      {items.map((item, index) => (
+        <section key={`${item.category ?? 'item'}-${index}`} className="md-advice-card">
+          <div className="md-advice-card-header">
+            <span className="md-advice-card-badge">建议分类</span>
+            <h4>{item.category ?? `方案 ${index + 1}`}</h4>
+          </div>
+          <div className="md-advice-card-body">
+            {item.summary && (
+              <div className="md-advice-row">
+                <span className="md-advice-label">说明</span>
+                <div className="md-advice-value">{item.summary}</div>
+              </div>
+            )}
+            {item.recommendation && (
+              <div className="md-advice-row md-advice-row-emphasis">
+                <span className="md-advice-label">建议</span>
+                <div className="md-advice-value">{item.recommendation}</div>
+              </div>
+            )}
+            {item.scenario && (
+              <div className="md-advice-row">
+                <span className="md-advice-label">适用场景</span>
+                <div className="md-advice-value">{item.scenario}</div>
+              </div>
+            )}
+            {item.pros && (
+              <div className="md-advice-row">
+                <span className="md-advice-label">优点</span>
+                <div className="md-advice-value">{item.pros}</div>
+              </div>
+            )}
+            {item.cons && (
+              <div className="md-advice-row md-advice-row-warning">
+                <span className="md-advice-label">注意事项</span>
+                <div className="md-advice-value">{item.cons}</div>
+              </div>
+            )}
+          </div>
+        </section>
+      ))}
+    </div>
+  )
+}
+
 function fixMarkdown(content: string): string {
   let fixed = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  fixed = normalizeMermaidSection(fixed)
-  fixed = normalizeStepSections(fixed)
-  fixed = normalizeSummarySections(fixed)
-  fixed = normalizePainSolutionSection(fixed)
-  fixed = normalizeDeliverableSection(fixed)
 
   fixed = fixed.replace(/<br\s*\/?>/gi, '\n')
   fixed = fixed.replace(/<\|im_start\|>.*?(?=\n|$)/g, '')
@@ -398,6 +1138,25 @@ function fixMarkdown(content: string): string {
 
   fixed = fixed.replace(/([^\n])(#{1,6})/g, '$1\n\n$2')
   fixed = fixed.replace(/^(#{1,6})([^\s#])/gm, '$1 $2')
+  fixed = fixed.replace(/(#{1,6}\s[^\n|]+)(\|(?=[^\n|]+\|[^\n|]+\|))/g, '$1\n\n$2')
+  fixed = fixed.replace(/([^\n])((?:\|[^\n|]+){4,}\|)/g, '$1\n\n$2')
+  fixed = fixed.replace(/(\|[^\n]+\|)\s*(>)/g, '$1\n\n$2')
+
+  fixed = expandDenseDoublePipeTables(fixed)
+  fixed = normalizeMermaidSection(fixed)
+  fixed = normalizeStepSections(fixed)
+  fixed = normalizeSummarySections(fixed)
+  fixed = normalizeVisualSeparators(fixed)
+  fixed = normalizeHeadingAttachedTable(fixed)
+  fixed = normalizeSingleLineDenseTables(fixed)
+  fixed = normalizeInlineMarkdownTables(fixed)
+  fixed = normalizeStructuredSpreadsheetBlocks(fixed)
+  fixed = normalizeSuggestionCardBlocks(fixed)
+  fixed = normalizeVerticalKeyValueTableBlocks(fixed)
+  fixed = normalizeFragmentedPipeTableBlocks(fixed)
+  fixed = normalizeLooseTableBlocks(fixed)
+  fixed = normalizePainSolutionSection(fixed)
+  fixed = normalizeDeliverableSection(fixed)
 
   fixed = fixed.replace(/\|\s*[-:]+[-| :]*\|/g, (match) => `\n${match}\n`)
   fixed = fixed.replace(/([^\n])(\|[^\n]+\|)/g, '$1\n$2')
@@ -738,6 +1497,10 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                             return <MermaidDiagram chart={codeContent} />
                           }
 
+                          if (!isInline && className?.includes('language-advice-cards')) {
+                            return <AdviceCardBlock content={codeContent} />
+                          }
+
                           return isInline ? (
                             <code className="md-inline-code" {...props}>
                               {children}
@@ -766,8 +1529,29 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                         table({ children, ...props }) {
                           return (
                             <div className="md-table-wrap">
-                              <table {...props}>{children}</table>
+                              <table className="md-data-table" {...props}>
+                                {children}
+                              </table>
                             </div>
+                          )
+                        },
+                        th({ children, ...props }) {
+                          return (
+                            <th className="md-data-table-head" {...props}>
+                              {children}
+                            </th>
+                          )
+                        },
+                        td({ children, ...props }) {
+                          const text = React.Children.toArray(children)
+                            .map((child) => (typeof child === 'string' ? child : ''))
+                            .join('')
+                            .trim()
+                          const highlight = /(推荐|优先|适合|高|强烈建议|最佳实践|风险|注意)/.test(text)
+                          return (
+                            <td className={`md-data-table-cell ${highlight ? 'md-data-table-cell-highlight' : ''}`} {...props}>
+                              {children}
+                            </td>
                           )
                         },
                       }}

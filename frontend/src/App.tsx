@@ -215,7 +215,7 @@ export interface DirectoryUploadTask {
   summaryMessage: string
 }
 
-const DIRECTORY_UPLOAD_ALLOWED_EXTENSIONS = new Set(['.txt', '.md', '.pdf'])
+const DIRECTORY_UPLOAD_ALLOWED_EXTENSIONS = new Set(['.txt', '.md', '.pdf', '.csv', '.xlsx'])
 
 const createEmptyDirectoryUploadTask = (): DirectoryUploadTask => ({
   knowledgeBaseId: null,
@@ -1017,7 +1017,7 @@ function App() {
     setDirectoryUploadTask({
       ...scannedTask,
       summaryMessage:
-        eligibleItems.length === 0 ? '所选目录中没有可上传的 .txt、.md 或 .pdf 文件。' : '',
+        eligibleItems.length === 0 ? '所选目录中没有可上传的 .txt、.md、.pdf、.csv 或 .xlsx 文件。' : '',
     })
 
     if (eligibleItems.length === 0) {

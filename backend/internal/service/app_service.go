@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"log"
 	"math"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -464,6 +465,36 @@ func (s *AppService) GetConfig() model.AppConfig {
 	return cfg
 }
 
+func IsSensitiveStructuredFileExtension(ext string) bool {
+	switch strings.ToLower(strings.TrimSpace(ext)) {
+	case ".csv", ".xlsx":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsLocalOllamaConfig(chat model.ChatConfig, embedding model.EmbeddingConfig) bool {
+	return strings.EqualFold(strings.TrimSpace(chat.Provider), "ollama") && strings.EqualFold(strings.TrimSpace(embedding.Provider), "ollama")
+}
+
+func (s *AppService) hasSensitiveStructuredDocuments() bool {
+	if s == nil || s.state == nil {
+		return false
+	}
+
+	s.state.Mu.RLock()
+	defer s.state.Mu.RUnlock()
+	for _, kb := range s.state.KnowledgeBases {
+		for _, document := range kb.Documents {
+			if IsSensitiveStructuredFileExtension(filepath.Ext(document.Name)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *AppService) defaultBaseURL(provider string) string {
 	if provider == "ollama" {
 		return s.serverConfig.OllamaBaseURL
@@ -520,6 +551,9 @@ func (s *AppService) UpdateConfig(req model.ConfigUpdateRequest) (model.AppConfi
 			Model:    embedModel,
 			APIKey:   strings.TrimSpace(req.Embedding.APIKey),
 		},
+	}
+	if s.hasSensitiveStructuredDocuments() && !IsLocalOllamaConfig(nextConfig.Chat, nextConfig.Embedding) {
+		return model.AppConfig{}, fmt.Errorf("sensitive structured documents require local ollama for both chat and embedding")
 	}
 
 	s.state.Mu.Lock()
@@ -727,6 +761,7 @@ func (s *AppService) BuildRetrievalContext(req model.ChatCompletionRequest) (str
 		return "", nil, err
 	}
 
+	chunks = deduplicateRetrievedChunks(chunks)
 	query := latestUserMessage(req.Messages)
 	contextText, sources := s.rag.BuildContext(chunks)
 	if s.contextCompressor != nil && chunksTotalChars(chunks) > 2000 {
@@ -1302,6 +1337,7 @@ func previewFromChunks(chunks []DocumentChunk) string {
 }
 
 func buildChunkText(chunks []RetrievedChunk) string {
+	chunks = deduplicateRetrievedChunks(chunks)
 	if len(chunks) == 0 {
 		return ""
 	}
@@ -1310,6 +1346,38 @@ func buildChunkText(chunks []RetrievedChunk) string {
 		lines = append(lines, fmt.Sprintf("[%s#%d] %s", chunk.DocumentName, chunk.Index+1, chunk.Text))
 	}
 	return strings.Join(lines, "\n\n")
+}
+
+func deduplicateRetrievedChunks(chunks []RetrievedChunk) []RetrievedChunk {
+	if len(chunks) <= 1 {
+		return chunks
+	}
+	seen := make(map[string]struct{}, len(chunks))
+	filtered := make([]RetrievedChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		textKey := normalizeChunkDedupText(chunk.Text)
+		if textKey == "" {
+			textKey = strings.ToLower(strings.TrimSpace(chunk.DocumentName))
+		}
+		key := strings.ToLower(strings.TrimSpace(chunk.DocumentID)) + "|" + textKey
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		filtered = append(filtered, chunk)
+	}
+	return filtered
+}
+
+func normalizeChunkDedupText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
+	trimmed = strings.ReplaceAll(trimmed, "\r", "\n")
+	trimmed = strings.Join(strings.Fields(trimmed), " ")
+	return strings.ToLower(trimmed)
 }
 
 func chunksTotalChars(chunks []RetrievedChunk) int {

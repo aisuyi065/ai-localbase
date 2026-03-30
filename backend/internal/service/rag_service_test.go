@@ -144,7 +144,7 @@ func TestAppServiceIndexDocumentWithExtractedText(t *testing.T) {
 		t.Fatalf("write indexed markdown file: %v", err)
 	}
 
-	service := NewAppService(nil, NewAppStateStore(""), model.ServerConfig{})
+	service := NewAppService(nil, NewAppStateStore(""), nil, model.ServerConfig{})
 	knowledgeBases := service.ListKnowledgeBases()
 	if len(knowledgeBases) == 0 {
 		t.Fatal("expected default knowledge base")

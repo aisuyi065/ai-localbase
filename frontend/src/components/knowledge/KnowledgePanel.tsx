@@ -197,7 +197,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({
                             <input
                               type="file"
                               multiple
-                              accept=".txt,.md,.pdf"
+                              accept=".txt,.md,.pdf,.csv,.xlsx"
                               className="hidden-input"
                               onChange={(e) => handleFileChange(kb.id, e)}
                             />

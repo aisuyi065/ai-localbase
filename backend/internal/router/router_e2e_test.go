@@ -98,6 +98,58 @@ func TestRouterConfigEndpoints(t *testing.T) {
 	}
 }
 
+func TestRouterRejectSensitiveStructuredUploadWithoutLocalOllama(t *testing.T) {
+	engine, _, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	updatePayload := map[string]any{
+		"chat": map[string]any{
+			"provider":    "openai-compatible",
+			"baseUrl":     "http://chat.remote/v1",
+			"model":       "gpt-test",
+			"apiKey":      "chat-key",
+			"temperature": 0.4,
+		},
+		"embedding": map[string]any{
+			"provider": "openai-compatible",
+			"baseUrl":  "http://embed.remote/v1",
+			"model":    "bge-m3",
+			"apiKey":   "embed-key",
+		},
+	}
+	resp := performJSONRequest(t, engine, http.MethodPut, "/api/config", updatePayload)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d, body=%s", resp.Code, resp.Body.String())
+	}
+
+	listResp := performRequest(t, engine, http.MethodGet, "/api/knowledge-bases", nil, "")
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d, body=%s", listResp.Code, listResp.Body.String())
+	}
+	var kbList struct {
+		Items []model.KnowledgeBase `json:"items"`
+	}
+	decodeJSONResponse(t, listResp.Body.Bytes(), &kbList)
+	if len(kbList.Items) == 0 {
+		t.Fatal("expected default knowledge base")
+	}
+
+	uploadResp := performMultipartUpload(
+		t,
+		engine,
+		http.MethodPost,
+		fmt.Sprintf("/api/knowledge-bases/%s/documents", kbList.Items[0].ID),
+		"sensitive.csv",
+		"姓名,部门\n张三,销售部\n",
+	)
+	if uploadResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d, body=%s", uploadResp.Code, uploadResp.Body.String())
+	}
+	if !strings.Contains(uploadResp.Body.String(), "requires local ollama") {
+		t.Fatalf("expected local ollama policy error, got %s", uploadResp.Body.String())
+	}
+}
+
 func TestRouterUploadRetrievalAndChatE2E(t *testing.T) {
 	engine, modelBaseURL, cleanup := newTestRouter(t)
 	defer cleanup()
@@ -162,6 +214,7 @@ Redis 支持过期时间设置，适合用作会话缓存或临时数据存储�
 	}
 
 	chatPayload := map[string]any{
+		"conversationId":  "conv-e2e-1",
 		"model":           "chat-test-model",
 		"knowledgeBaseId": knowledgeBaseID,
 		"documentId":      uploadResult.Uploaded.ID,
@@ -199,10 +252,89 @@ Redis 支持过期时间设置，适合用作会话缓存或临时数据存储�
 	}
 }
 
+func TestRouterStructuredCSVCountQuestionUsesCondensedAnswerRules(t *testing.T) {
+	engine, modelBaseURL, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	listResp := performRequest(t, engine, http.MethodGet, "/api/knowledge-bases", nil, "")
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d, body=%s", listResp.Code, listResp.Body.String())
+	}
+
+	var kbList struct {
+		Items []model.KnowledgeBase `json:"items"`
+	}
+	decodeJSONResponse(t, listResp.Body.Bytes(), &kbList)
+	if len(kbList.Items) == 0 {
+		t.Fatal("expected default knowledge base")
+	}
+	knowledgeBaseID := kbList.Items[0].ID
+
+	csvContent := "姓名,性别,职称,教龄\n张三,男,高级职称,20\n李四,女,中级职称,8\n王五,男,无职称,4\n赵六,女,助教,1\n"
+	uploadResp := performMultipartUpload(
+		t,
+		engine,
+		http.MethodPost,
+		fmt.Sprintf("/api/knowledge-bases/%s/documents", knowledgeBaseID),
+		"employees.csv",
+		csvContent,
+	)
+	if uploadResp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d, body=%s", uploadResp.Code, uploadResp.Body.String())
+	}
+
+	var uploadResult model.UploadResponse
+	decodeJSONResponse(t, uploadResp.Body.Bytes(), &uploadResult)
+
+	chatPayload := map[string]any{
+		"conversationId":  "conv-e2e-csv-count",
+		"model":           "chat-test-model",
+		"knowledgeBaseId": knowledgeBaseID,
+		"documentId":      uploadResult.Uploaded.ID,
+		"config": map[string]any{
+			"provider":    "ollama",
+			"baseUrl":     modelBaseURL,
+			"model":       "chat-test-model",
+			"apiKey":      "",
+			"temperature": 0.2,
+		},
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "这个文档有多少名员工",
+		}},
+	}
+
+	resp := performJSONRequest(t, engine, http.MethodPost, "/v1/chat/completions", chatPayload)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d, body=%s", resp.Code, resp.Body.String())
+	}
+
+	var chatResult model.ChatCompletionResponse
+	decodeJSONResponse(t, resp.Body.Bytes(), &chatResult)
+	if len(chatResult.Choices) == 0 {
+		t.Fatal("expected chat choices")
+	}
+	answer := chatResult.Choices[0].Message.Content
+	if !strings.Contains(answer, "该文档中共有 4 名员工") {
+		t.Fatalf("expected concise count answer, got %q", answer)
+	}
+	if strings.Count(answer, "4 名员工") != 1 {
+		t.Fatalf("expected count conclusion to appear once, got %q", answer)
+	}
+	if strings.Contains(answer, "字段：") {
+		t.Fatalf("expected field list to be omitted for count question, got %q", answer)
+	}
+}
+
 func newTestRouter(t *testing.T) (*http.ServeMux, string, func()) {
 	t.Helper()
 
 	uploadDir := t.TempDir()
+	chatHistoryPath := filepath.Join(t.TempDir(), "chat-history.db")
+	chatHistoryStore, err := service.NewSQLiteChatHistoryStore(chatHistoryPath)
+	if err != nil {
+		t.Fatalf("create chat history store: %v", err)
+	}
 	qdrantState := &qdrantTestServer{collections: map[string]*qdrantCollectionState{}}
 	qdrantHTTP := httptest.NewServer(http.HandlerFunc(qdrantState.handle))
 	modelHTTP := httptest.NewServer(http.HandlerFunc(handleModelAPI))
@@ -218,8 +350,8 @@ func newTestRouter(t *testing.T) (*http.ServeMux, string, func()) {
 	}
 
 	qdrantService := service.NewQdrantService(serverConfig)
-	appService := service.NewAppService(qdrantService, service.NewAppStateStore(""), serverConfig)
-	_, err := appService.UpdateConfig(model.ConfigUpdateRequest{
+	appService := service.NewAppService(qdrantService, service.NewAppStateStore(""), chatHistoryStore, serverConfig)
+	_, err = appService.UpdateConfig(model.ConfigUpdateRequest{
 		Chat: model.ChatConfig{
 			Provider:    "ollama",
 			BaseURL:     modelHTTP.URL,
@@ -245,6 +377,7 @@ func newTestRouter(t *testing.T) (*http.ServeMux, string, func()) {
 	mux.Handle("/", ginEngine)
 
 	cleanup := func() {
+		_ = chatHistoryStore.Close()
 		modelHTTP.Close()
 		qdrantHTTP.Close()
 		_ = os.RemoveAll(uploadDir)
@@ -406,7 +539,9 @@ func handleModelAPI(w http.ResponseWriter, r *http.Request) {
 	case "/chat/completions":
 		body, _ := io.ReadAll(r.Body)
 		content := "已基于检索上下文回答：Redis 是高性能内存数据库。"
-		if !bytes.Contains(body, []byte("Redis")) {
+		if bytes.Contains(body, []byte("这个文档有多少名员工")) && bytes.Contains(body, []byte("数据行数：4")) {
+			content = "该文档中共有 4 名员工。\n统计依据：按表头下方的数据行统计，共 4 条员工记录。"
+		} else if !bytes.Contains(body, []byte("Redis")) {
 			content = "已收到请求，但未检测到上下文。"
 		}
 		response := chatTestResponse{
@@ -438,7 +573,9 @@ func handleModelAPI(w http.ResponseWriter, r *http.Request) {
 	case "/api/chat":
 		body, _ := io.ReadAll(r.Body)
 		content := "已基于检索上下文回答：Redis 是高性能内存数据库。"
-		if !bytes.Contains(body, []byte("Redis")) {
+		if bytes.Contains(body, []byte("这个文档有多少名员工")) && bytes.Contains(body, []byte("数据行数：4")) {
+			content = "该文档中共有 4 名员工。\n统计依据：按表头下方的数据行统计，共 4 条员工记录。"
+		} else if !bytes.Contains(body, []byte("Redis")) {
 			content = "已收到请求，但未检测到上下文。"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{

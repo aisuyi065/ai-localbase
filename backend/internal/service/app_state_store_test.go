@@ -99,7 +99,7 @@ func TestNewAppServiceLoadsPersistedState(t *testing.T) {
 		t.Fatalf("save persisted state: %v", err)
 	}
 
-	service := NewAppService(nil, store, model.ServerConfig{})
+	service := NewAppService(nil, store, nil, model.ServerConfig{})
 	config := service.GetConfig()
 	if config.Chat.Model != "persisted-chat-model" {
 		t.Fatalf("expected persisted chat model, got %s", config.Chat.Model)
@@ -115,7 +115,7 @@ func TestNewAppServicePersistsDefaultState(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "default-state.json")
 	store := NewAppStateStore(statePath)
 
-	service := NewAppService(nil, store, model.ServerConfig{})
+	service := NewAppService(nil, store, nil, model.ServerConfig{})
 	if service == nil {
 		t.Fatal("expected app service")
 	}
